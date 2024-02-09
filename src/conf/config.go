@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -15,65 +16,313 @@ type ConfigReader interface {
 
 type Config struct {
 	Connection
+	Saving
 	Mailboxes map[string]MailboxConfig
 }
 
+type Saving struct {
+	SaveFolder string
+}
+
 type Connection struct {
-	url      string
-	port     int
+	Url      string
+	Port     int
 	Username string
 	Password string
 }
 
 type MailboxConfig struct {
 	Mailbox         string
+	MailOffset      int
 	DeleteMails     bool
 	MinAgeInDays    int
 	MinEmailsToKeep int
 }
 
 func (c *Config) Read() error {
-	content, err := os.ReadFile(filepath.Join(paths.ConfigPath, "connection.conf"))
+	content, err := os.ReadFile(filepath.Join(paths.ConfigPath, "emailCrawlerConfig.conf"))
 	if err != nil {
 		return err
 	}
-	lines := strings.Split(string(content), "\n")
+	tokens, err := tokenize(string(content))
+	if err != nil {
+		return err
+	}
+	err = c.parseTokensToConfig(tokens)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func tokenize(fileContent string) (map[string][]string, error) {
+	tokens := map[string][]string{}
+	lines := strings.Split(fileContent, "\n")
+	var tag string = ""
+	var configLines []string
 	for _, line := range lines {
-		if line[0] == '[' {
+		line = strings.TrimSpace(line)
+		line = strings.ReplaceAll(line, " ", "")
+		if len(line) == 0 {
 			continue
 		}
-		line = strings.ReplaceAll(line, " ", "")
-		line = strings.TrimSpace(line)
-		parts := strings.SplitN(line, "=", 2)
-		key := parts[0]
-		value := parts[1]
+		if line[0] == '[' {
+			if tag != "" {
+				tokens[tag] = configLines
+				tag = ""
+				configLines = []string{}
+			}
+			regex, err := regexp.Compile(`\[(.*?)]`)
+			if err != nil {
+				return nil, err
+			}
+			tags := regex.FindStringSubmatch(line)[1:]
+			if len(tags) > 1 {
+				return nil, TooManyTagsError{
+					Config: "Mailboxes",
+					Tags:   tags,
+				}
+			}
+			if len(tags) == 0 {
+				return nil, EmptyTagError{
+					Config: "Mailboxes",
+				}
+			}
+			tag = tags[0]
+			continue
+		}
+		configLines = append(configLines, line)
+	}
+	if tag != "" {
+		tokens[tag] = configLines
+	}
+	return tokens, nil
+}
+
+func (c *Config) parseTokensToConfig(tokens map[string][]string) error {
+	for key, value := range tokens {
 		switch key {
-		case "url":
-			c.url = value
-		case "port":
-			c.port, err = strconv.Atoi(value)
+		case "Saving":
+			err := c.parseSaving(value)
 			if err != nil {
 				return err
 			}
-		case "username":
-			c.Username = value
-		case "password":
-			c.Password = value
+		case "Connection":
+			err := c.parseConnection(value)
+			if err != nil {
+				return err
+			}
 		default:
-			return WrongConfigValueError{
-				Config: "Connection",
-				Value:  value,
+			err := c.parseMailbox(key, value)
+			if err != nil {
+				return err
 			}
 		}
 	}
 	return nil
 }
 
-type WrongConfigValueError struct {
-	Config string
-	Value  string
+func (c *Config) parseSaving(lines []string) error {
+	for _, line := range lines {
+		parts := strings.SplitN(line, "=", 2)
+		key := parts[0]
+		value := parts[1]
+		switch key {
+		case "SaveFolder":
+			c.SaveFolder = value
+		default:
+			return InvalidConfigKeyError{
+				Config: "Connection",
+				Key:    value,
+			}
+		}
+	}
+	return nil
 }
 
-func (e WrongConfigValueError) Error() string {
-	return fmt.Sprintf("Value %s not known in Config %s", e.Value, e.Config)
+func (c *Config) parseConnection(lines []string) error {
+	for _, line := range lines {
+		parts := strings.SplitN(line, "=", 2)
+		key := parts[0]
+		value := parts[1]
+		switch key {
+		case "Url":
+			c.Url = value
+		case "Port":
+			var err error
+			if c.Port, err = strconv.Atoi(value); err != nil {
+				return err
+			}
+		case "Username":
+			c.Username = value
+		case "Password":
+			c.Password = value
+		default:
+			return InvalidConfigKeyError{
+				Config: "Connection",
+				Key:    value,
+			}
+		}
+	}
+	return nil
+}
+
+func (c *Config) parseMailbox(name string, lines []string) error {
+	mailboxConfig := MailboxConfig{
+		Mailbox: name,
+	}
+	for _, line := range lines {
+		parts := strings.SplitN(line, "=", 2)
+		key := parts[0]
+		value := parts[1]
+		switch key {
+		case "MailOffset":
+			var err error
+			if mailboxConfig.MailOffset, err = strconv.Atoi(value); err != nil {
+				return err
+			}
+		case "DeleteMails":
+			var err error
+			if mailboxConfig.DeleteMails, err = strconv.ParseBool(value); err != nil {
+				return err
+			}
+		case "MinAgeInDaysToDelete":
+			var err error
+			if mailboxConfig.MinAgeInDays, err = strconv.Atoi(value); err != nil {
+				return err
+			}
+		case "MinEmailsToKeep":
+			var err error
+			if mailboxConfig.MinEmailsToKeep, err = strconv.Atoi(value); err != nil {
+				return err
+			}
+		default:
+			return InvalidConfigKeyError{
+				Config: "Connection",
+				Key:    value,
+			}
+		}
+	}
+	if c.Mailboxes == nil {
+		c.Mailboxes = map[string]MailboxConfig{}
+	}
+	c.Mailboxes[name] = mailboxConfig
+	return nil
+}
+
+//func (c *Config) readConnection() error {
+//	content, err := os.ReadFile(filepath.Join(paths.ConfigPath, "connection.conf"))
+//	if err != nil {
+//		return err
+//	}
+//	lines := strings.Split(string(content), "\n")
+//	for _, line := range lines {
+//		if line[0] == '[' {
+//			continue
+//		}
+//		line = strings.ReplaceAll(line, " ", "")
+//		line = strings.TrimSpace(line)
+//		parts := strings.SplitN(line, "=", 2)
+//		key := parts[0]
+//		value := parts[1]
+//		switch key {
+//		case "Url":
+//			c.Url = value
+//		case "Port":
+//			c.Port, err = strconv.Atoi(value)
+//			if err != nil {
+//				return err
+//			}
+//		case "username":
+//			c.Username = value
+//		case "password":
+//			c.Password = value
+//		default:
+//			return InvalidConfigKeyError{
+//				Config: "Connection",
+//				Key:    value,
+//			}
+//		}
+//	}
+//	return nil
+//}
+//
+//func (c *Config) readMailboxes() error {
+//	content, err := os.ReadFile(filepath.Join(paths.ConfigPath, "mailboxes.conf"))
+//	if err != nil {
+//		return err
+//	}
+//	lines := strings.Split(string(content), "\n")
+//	for _, line := range lines {
+//		if line[0] == '[' {
+//			regex, err := regexp.Compile(`\[(.*?)]`)
+//			if err != nil {
+//				return err
+//			}
+//			tags := regex.FindStringSubmatch(line)[1:]
+//			if len(tags) > 1 {
+//				return TooManyTagsError{
+//					Config: "Mailboxes",
+//					Tags:   tags,
+//				}
+//			}
+//			if len(tags) == 0 {
+//				return EmptyTagError{
+//					Config: "Mailboxes",
+//				}
+//			}
+//			tag := tags[0]
+//			continue
+//		}
+//		line = strings.ReplaceAll(line, " ", "")
+//		line = strings.TrimSpace(line)
+//		parts := strings.SplitN(line, "=", 2)
+//		key := parts[0]
+//		value := parts[1]
+//		switch key {
+//		case "Url":
+//			c.Url = value
+//		case "Port":
+//			c.Port, err = strconv.Atoi(value)
+//			if err != nil {
+//				return err
+//			}
+//		case "username":
+//			c.Username = value
+//		case "password":
+//			c.Password = value
+//		default:
+//			return InvalidConfigKeyError{
+//				Config: "Connection",
+//				Key:    value,
+//			}
+//		}
+//	}
+//	return nil
+//}
+
+type EmptyTagError struct {
+	Config string
+}
+
+func (e EmptyTagError) Error() string {
+	return fmt.Sprintf("Tag cannot be empty.")
+}
+
+type TooManyTagsError struct {
+	Config string
+	Tags   []string
+}
+
+func (e TooManyTagsError) Error() string {
+	return fmt.Sprintf("Only one Tag is allowed, but found %d. %s", len(e.Tags), e.Tags)
+}
+
+type InvalidConfigKeyError struct {
+	Config string
+	Key    string
+}
+
+func (e InvalidConfigKeyError) Error() string {
+	return fmt.Sprintf("Key %s not known in Config %s", e.Key, e.Config)
 }
