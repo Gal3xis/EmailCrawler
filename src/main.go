@@ -8,8 +8,9 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"regexp"
+	"sort"
 	"strconv"
+	"strings"
 )
 
 var Config = conf.Config{}
@@ -54,19 +55,34 @@ func Work(client *client.Client, mailboxConfig conf.MailboxConfig) error {
 	}
 
 	seqset := new(imap.SeqSet)
-	seqset.Add("1:*")
+	err = seqset.Add("1:*")
 	if err != nil {
 		return err
 	}
-	items := []imap.FetchItem{imap.FetchItem("BODY[]"), imap.FetchEnvelope, imap.FetchFlags, imap.FetchInternalDate, imap.FetchRFC822Size, imap.FetchBody, imap.FetchBodyStructure}
+	items := []imap.FetchItem{imap.FetchItem("BODY[]"), imap.FetchEnvelope, imap.FetchFlags, imap.FetchInternalDate, imap.FetchRFC822Size, imap.FetchBody, imap.FetchBodyStructure, imap.FetchUid}
 
-	messages := make(chan *imap.Message)
+	channel := make(chan *imap.Message)
 	done := make(chan error, 1)
 	go func() {
-		done <- client.Fetch(seqset, items, messages)
+		done <- client.Fetch(seqset, items, channel)
 	}()
+	var messages []*imap.Message
+	for msg := range channel {
+		messages = append(messages, msg)
+	}
+	var toDelete []uint32
+	// Sortieren der Nachrichten absteigend nach Datum
+	sort.Slice(messages, func(i, j int) bool {
+		// Überprüfen Sie, ob das Datum der Nachricht i nach dem Datum der Nachricht j liegt
+		return messages[i].Envelope.Date.After(messages[j].Envelope.Date)
+	})
 
-	for msg := range messages {
+	if mailboxConfig.MailOffset > len(messages) {
+		return nil
+	}
+	messages = messages[mailboxConfig.MailOffset:]
+
+	for _, msg := range messages {
 		section := &imap.BodySectionName{} // Keine spezifischen Teile angegeben, holt den kompletten Inhalt
 		body := msg.GetBody(section)
 		if body == nil {
@@ -75,29 +91,92 @@ func Work(client *client.Client, mailboxConfig conf.MailboxConfig) error {
 		}
 		content, err := io.ReadAll(body)
 		if err != nil {
-			log.Fatal("Fehler beim Lesen der Nachricht:", err)
+			log.Println("Fehler beim Lesen der Nachricht:", err)
 		}
-
-		filename := sanitizeSubject(msg.Envelope.Subject) + ".eml"
-		filepath := filepath.Join(Config.SaveFolder, filename)
-		file, err := os.Create(filepath)
+		filename := getRelSavePath(mailboxConfig, msg)
+		filePath := filepath.Join(mailboxConfig.SaveFolder, filename) + ".eml"
+		if fileExists(filePath) {
+			log.Print("File Existiert bereits")
+			continue
+		}
+		dirPath := filepath.Dir(filePath)
+		err = os.MkdirAll(dirPath, 0755)
 		if err != nil {
-			return err
+			log.Print(err.Error())
+			continue
+		}
+		file, err := os.Create(filePath)
+		if err != nil {
+			file.Close()
+			log.Print(err.Error())
+			continue
 		}
 		file.WriteString(string(content))
+		setCreationTime(filePath, msg.InternalDate)
 		file.Close()
+
+		toDelete = append(toDelete, msg.Uid)
 	}
+	//DeleteMails(toDelete, client, mailboxConfig)
 	return nil
 }
 
-func sanitizeSubject(subject string) string {
-	// Entfernen Sie alle unerwünschten Zeichen aus dem Betreff
-	reg := regexp.MustCompile(`[^a-zA-Z0-9]+`)
-	safeSubject := reg.ReplaceAllString(subject, "_")
-
-	// Begrenzen Sie die Länge des Dateinamens
-	if len(safeSubject) > 50 {
-		safeSubject = safeSubject[:50]
+func fileExists(filePath string) bool {
+	_, err := os.Stat(filePath)
+	if err == nil { // Kein Fehler, Datei existiert
+		return true
 	}
-	return safeSubject
+	if os.IsNotExist(err) { // Spezifischer Fehler für nicht existierende Datei
+		return false
+	}
+	return false // Andere Fehler könnten auftreten, z.B. Berechtigungsprobleme
+}
+
+func sanitizePathSegment(segment string) string {
+	return strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			return r
+		}
+		return '_'
+	}, segment)
+}
+
+func getRelSavePath(mailboxConfig conf.MailboxConfig, msg *imap.Message) string {
+	path := mailboxConfig.SavingStructure
+	path = strings.ReplaceAll(path, "%_FROM_%", sanitizePathSegment(msg.Envelope.From[0].Address()))
+	path = strings.ReplaceAll(path, "%_SUBJECT_%", sanitizePathSegment(getSubject(msg)))
+	path = strings.ReplaceAll(path, "%_DATE_%", sanitizePathSegment(msg.InternalDate.Format("02-01-2006T15-04-05")))
+	return path
+}
+
+func getSubject(msg *imap.Message) string {
+	if msg.Envelope.Subject == "" {
+		return "No Subject"
+	}
+	return msg.Envelope.Subject
+}
+
+func DeleteMails(uids []uint32, client *client.Client, mailboxConfig conf.MailboxConfig) {
+	_, err := client.Select(mailboxConfig.Mailbox, false)
+	if err != nil {
+		log.Printf(err.Error())
+		return
+	}
+
+	seqSet := new(imap.SeqSet)
+	seqSet.AddNum(uids...) // Hinzufügen aller UIDs auf einmal
+
+	item := imap.FormatFlagsOp(imap.AddFlags, true)
+	flags := []interface{}{imap.DeletedFlag}
+	if err := client.UidStore(seqSet, item, flags, nil); err != nil { // Verwenden von UidStore
+		log.Printf("Fehler beim Markieren der E-Mails als gelöscht: %v", err)
+		return
+	}
+
+	if err := client.Expunge(nil); err != nil {
+		log.Printf("Fehler beim Ausführen von Expunge: %v", err)
+		return
+	}
+
+	log.Println("E-Mails erfolgreich gelöscht")
 }

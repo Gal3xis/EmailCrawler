@@ -16,12 +16,7 @@ type ConfigReader interface {
 
 type Config struct {
 	Connection
-	Saving
 	Mailboxes map[string]MailboxConfig
-}
-
-type Saving struct {
-	SaveFolder string
 }
 
 type Connection struct {
@@ -33,6 +28,8 @@ type Connection struct {
 
 type MailboxConfig struct {
 	Mailbox         string
+	SaveFolder      string
+	SavingStructure string
 	MailOffset      int
 	DeleteMails     bool
 	MinAgeInDays    int
@@ -102,11 +99,6 @@ func tokenize(fileContent string) (map[string][]string, error) {
 func (c *Config) parseTokensToConfig(tokens map[string][]string) error {
 	for key, value := range tokens {
 		switch key {
-		case "Saving":
-			err := c.parseSaving(value)
-			if err != nil {
-				return err
-			}
 		case "Connection":
 			err := c.parseConnection(value)
 			if err != nil {
@@ -116,24 +108,6 @@ func (c *Config) parseTokensToConfig(tokens map[string][]string) error {
 			err := c.parseMailbox(key, value)
 			if err != nil {
 				return err
-			}
-		}
-	}
-	return nil
-}
-
-func (c *Config) parseSaving(lines []string) error {
-	for _, line := range lines {
-		parts := strings.SplitN(line, "=", 2)
-		key := parts[0]
-		value := parts[1]
-		switch key {
-		case "SaveFolder":
-			c.SaveFolder = value
-		default:
-			return InvalidConfigKeyError{
-				Config: "Connection",
-				Key:    value,
 			}
 		}
 	}
@@ -177,10 +151,15 @@ func (c *Config) parseMailbox(name string, lines []string) error {
 		value := parts[1]
 		switch key {
 		case "MailOffset":
-			var err error
-			if mailboxConfig.MailOffset, err = strconv.Atoi(value); err != nil {
+			if valueInt, err := strconv.Atoi(value); err != nil {
 				return err
+			} else {
+				mailboxConfig.MailOffset = valueInt + 1
 			}
+		case "SaveFolder":
+			mailboxConfig.SaveFolder = value
+		case "SavingStructure":
+			mailboxConfig.SavingStructure = value
 		case "DeleteMails":
 			var err error
 			if mailboxConfig.DeleteMails, err = strconv.ParseBool(value); err != nil {
@@ -209,97 +188,15 @@ func (c *Config) parseMailbox(name string, lines []string) error {
 	c.Mailboxes[name] = mailboxConfig
 	return nil
 }
-
-//func (c *Config) readConnection() error {
-//	content, err := os.ReadFile(filepath.Join(paths.ConfigPath, "connection.conf"))
-//	if err != nil {
-//		return err
-//	}
-//	lines := strings.Split(string(content), "\n")
-//	for _, line := range lines {
-//		if line[0] == '[' {
-//			continue
-//		}
-//		line = strings.ReplaceAll(line, " ", "")
-//		line = strings.TrimSpace(line)
-//		parts := strings.SplitN(line, "=", 2)
-//		key := parts[0]
-//		value := parts[1]
-//		switch key {
-//		case "Url":
-//			c.Url = value
-//		case "Port":
-//			c.Port, err = strconv.Atoi(value)
-//			if err != nil {
-//				return err
-//			}
-//		case "username":
-//			c.Username = value
-//		case "password":
-//			c.Password = value
-//		default:
-//			return InvalidConfigKeyError{
-//				Config: "Connection",
-//				Key:    value,
-//			}
-//		}
-//	}
-//	return nil
-//}
-//
-//func (c *Config) readMailboxes() error {
-//	content, err := os.ReadFile(filepath.Join(paths.ConfigPath, "mailboxes.conf"))
-//	if err != nil {
-//		return err
-//	}
-//	lines := strings.Split(string(content), "\n")
-//	for _, line := range lines {
-//		if line[0] == '[' {
-//			regex, err := regexp.Compile(`\[(.*?)]`)
-//			if err != nil {
-//				return err
-//			}
-//			tags := regex.FindStringSubmatch(line)[1:]
-//			if len(tags) > 1 {
-//				return TooManyTagsError{
-//					Config: "Mailboxes",
-//					Tags:   tags,
-//				}
-//			}
-//			if len(tags) == 0 {
-//				return EmptyTagError{
-//					Config: "Mailboxes",
-//				}
-//			}
-//			tag := tags[0]
-//			continue
-//		}
-//		line = strings.ReplaceAll(line, " ", "")
-//		line = strings.TrimSpace(line)
-//		parts := strings.SplitN(line, "=", 2)
-//		key := parts[0]
-//		value := parts[1]
-//		switch key {
-//		case "Url":
-//			c.Url = value
-//		case "Port":
-//			c.Port, err = strconv.Atoi(value)
-//			if err != nil {
-//				return err
-//			}
-//		case "username":
-//			c.Username = value
-//		case "password":
-//			c.Password = value
-//		default:
-//			return InvalidConfigKeyError{
-//				Config: "Connection",
-//				Key:    value,
-//			}
-//		}
-//	}
-//	return nil
-//}
+func clampInt(value, min, max int) int {
+	if value < min {
+		return min
+	}
+	if value > max {
+		return max
+	}
+	return value
+}
 
 type EmptyTagError struct {
 	Config string
