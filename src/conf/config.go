@@ -58,6 +58,9 @@ func tokenize(fileContent string) (map[string][]string, error) {
 	var tag string = ""
 	var configLines []string
 	for _, line := range lines {
+		if len(line) == 0 || line[0] == ';' {
+			continue
+		}
 		line = strings.TrimSpace(line)
 		line = strings.ReplaceAll(line, " ", "")
 		if len(line) == 0 {
@@ -188,6 +191,7 @@ func (c *Config) parseMailbox(name string, lines []string) error {
 	c.Mailboxes[name] = mailboxConfig
 	return nil
 }
+
 func clampInt(value, min, max int) int {
 	if value < min {
 		return min

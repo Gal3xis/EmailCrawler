@@ -2,4 +2,5 @@
 
 package paths
 
-const ConfigPath = "C:\\Users\\alexl\\source\\programs\\EmailCrawler\\run\\etc"
+//
+//const ConfigPath = "C:\\Users\\alexl\\source\\EmailCrawler\\run\\etc"

@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 var Config = conf.Config{}
@@ -19,6 +20,7 @@ func main() {
 	// Config einlesen
 	err := Config.Read()
 	if err != nil {
+		log.Println(err.Error())
 		return
 	}
 
@@ -71,18 +73,16 @@ func Work(client *client.Client, mailboxConfig conf.MailboxConfig) error {
 		messages = append(messages, msg)
 	}
 	var toDelete []uint32
-	// Sortieren der Nachrichten absteigend nach Datum
 	sort.Slice(messages, func(i, j int) bool {
-		// Überprüfen Sie, ob das Datum der Nachricht i nach dem Datum der Nachricht j liegt
 		return messages[i].Envelope.Date.After(messages[j].Envelope.Date)
 	})
 
 	if mailboxConfig.MailOffset > len(messages) {
 		return nil
 	}
-	messages = messages[mailboxConfig.MailOffset:]
+	messages = messages[mailboxConfig.MailOffset-1:]
 
-	for _, msg := range messages {
+	for i, msg := range messages {
 		section := &imap.BodySectionName{} // Keine spezifischen Teile angegeben, holt den kompletten Inhalt
 		body := msg.GetBody(section)
 		if body == nil {
@@ -95,29 +95,33 @@ func Work(client *client.Client, mailboxConfig conf.MailboxConfig) error {
 		}
 		filename := getRelSavePath(mailboxConfig, msg)
 		filePath := filepath.Join(mailboxConfig.SaveFolder, filename) + ".eml"
-		if fileExists(filePath) {
-			log.Print("File Existiert bereits")
-			continue
-		}
-		dirPath := filepath.Dir(filePath)
-		err = os.MkdirAll(dirPath, 0755)
-		if err != nil {
-			log.Print(err.Error())
-			continue
-		}
-		file, err := os.Create(filePath)
-		if err != nil {
+		if !fileExists(filePath) {
+			dirPath := filepath.Dir(filePath)
+			err = os.MkdirAll(dirPath, 0755)
+			if err != nil {
+				log.Print(err.Error())
+				continue
+			}
+			file, err := os.Create(filePath)
+			if err != nil {
+				file.Close()
+				log.Print(err.Error())
+				continue
+			}
+			file.WriteString(string(content))
+			setCreationTime(filePath, msg.InternalDate)
 			file.Close()
-			log.Print(err.Error())
+		}
+
+		ageInDays := int(time.Since(msg.InternalDate).Hours() / (float64(24)))
+		if i < mailboxConfig.MinEmailsToKeep || ageInDays < mailboxConfig.MinAgeInDays {
 			continue
 		}
-		file.WriteString(string(content))
-		setCreationTime(filePath, msg.InternalDate)
-		file.Close()
-
 		toDelete = append(toDelete, msg.Uid)
 	}
-	//DeleteMails(toDelete, client, mailboxConfig)
+	if mailboxConfig.DeleteMails {
+		DeleteMails(toDelete, client, mailboxConfig)
+	}
 	return nil
 }
 
@@ -157,6 +161,9 @@ func getSubject(msg *imap.Message) string {
 }
 
 func DeleteMails(uids []uint32, client *client.Client, mailboxConfig conf.MailboxConfig) {
+	if uids == nil {
+		return
+	}
 	_, err := client.Select(mailboxConfig.Mailbox, false)
 	if err != nil {
 		log.Printf(err.Error())
@@ -164,11 +171,11 @@ func DeleteMails(uids []uint32, client *client.Client, mailboxConfig conf.Mailbo
 	}
 
 	seqSet := new(imap.SeqSet)
-	seqSet.AddNum(uids...) // Hinzufügen aller UIDs auf einmal
+	seqSet.AddNum(uids...)
 
 	item := imap.FormatFlagsOp(imap.AddFlags, true)
 	flags := []interface{}{imap.DeletedFlag}
-	if err := client.UidStore(seqSet, item, flags, nil); err != nil { // Verwenden von UidStore
+	if err := client.UidStore(seqSet, item, flags, nil); err != nil {
 		log.Printf("Fehler beim Markieren der E-Mails als gelöscht: %v", err)
 		return
 	}
