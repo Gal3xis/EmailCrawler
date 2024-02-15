@@ -109,7 +109,7 @@ func Work(client *client.Client, mailboxConfig conf.MailboxConfig) error {
 				continue
 			}
 			file.WriteString(string(content))
-			setCreationTime(filePath, msg.InternalDate)
+			//setCreationTime(filePath, msg.InternalDate)
 			file.Close()
 		}
 
