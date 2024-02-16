@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -41,12 +42,34 @@ func main() {
 	log.Println("Logged in")
 	defer c.Logout()
 
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "list":
+			list(c)
+
+		}
+		return
+	}
+
 	for _, mailboxConfig := range Config.Mailboxes {
 		err := Work(c, mailboxConfig)
 		if err != nil {
 			log.Printf(err.Error())
 			continue
 		}
+	}
+}
+
+func list(c *client.Client) {
+	mailboxes := make(chan *imap.MailboxInfo, 10)
+	done := make(chan error, 1)
+	go func() {
+		done <- c.List("", "*", mailboxes)
+	}()
+
+	log.Println("Mailboxen")
+	for m := range mailboxes {
+		log.Println(m.Name)
 	}
 }
 
@@ -147,9 +170,9 @@ func sanitizePathSegment(segment string) string {
 
 func getRelSavePath(mailboxConfig conf.MailboxConfig, msg *imap.Message) string {
 	path := mailboxConfig.SavingStructure
-	path = strings.ReplaceAll(path, "%_FROM_%", sanitizePathSegment(msg.Envelope.From[0].Address()))
-	path = strings.ReplaceAll(path, "%_SUBJECT_%", sanitizePathSegment(getSubject(msg)))
-	path = strings.ReplaceAll(path, "%_DATE_%", sanitizePathSegment(msg.InternalDate.Format("02-01-2006T15-04-05")))
+	path = strings.ReplaceAll(path, "%_FROM_%", removeControlCharacters(sanitizePathSegment(msg.Envelope.From[0].Address())))
+	path = strings.ReplaceAll(path, "%_SUBJECT_%", removeControlCharacters(sanitizePathSegment(getSubject(msg))))
+	path = strings.ReplaceAll(path, "%_DATE_%", removeControlCharacters(sanitizePathSegment(msg.InternalDate.Format("02-01-2006T15-04-05"))))
 	return path
 }
 
@@ -157,7 +180,18 @@ func getSubject(msg *imap.Message) string {
 	if msg.Envelope.Subject == "" {
 		return "No Subject"
 	}
-	return msg.Envelope.Subject
+	subject := msg.Envelope.Subject
+	if len(subject) > 100 {
+		subject = subject[:100]
+	}
+	return subject
+}
+
+func removeControlCharacters(str string) string {
+	// Regulärer Ausdruck, der alle Kontrollzeichen erfasst
+	reg := regexp.MustCompile(`[\x00-\x1F\x7F]`)
+	// Ersetzt alle Vorkommen der Kontrollzeichen durch ""
+	return reg.ReplaceAllString(str, "")
 }
 
 func DeleteMails(uids []uint32, client *client.Client, mailboxConfig conf.MailboxConfig) {
